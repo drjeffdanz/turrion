@@ -68,7 +68,7 @@ async def link_by_entity(conn, decision_id, entity_ref, ts):
         SELECT id FROM decisions
         WHERE entity_ref = $1 AND id <> $2
           AND ts <  $3
-          AND ts >= $3 - ($4 || ' seconds')::interval
+          AND ts >= $3::timestamptz - ($4 || ' seconds')::interval
         ORDER BY ts DESC
         LIMIT 3
         """,
@@ -89,7 +89,7 @@ async def link_by_temporal_handoff(conn, event_id, source_system, entity_uuids, 
         WHERE source_system <> $1
           AND entity_refs && $2::uuid[]
           AND ts <  $3
-          AND ts >= $3 - ($4 || ' seconds')::interval
+          AND ts >= $3::timestamptz - ($4 || ' seconds')::interval
           AND id <> $5
         ORDER BY ts DESC
         LIMIT 3
@@ -112,8 +112,8 @@ async def detect_divergence(conn, entity_ref, field, value, actor_id, decision_i
           AND value IS DISTINCT FROM $3
           AND id <> $4
           AND actor_id IS DISTINCT FROM $5
-          AND ts >= $6 - ($7 || ' seconds')::interval
-          AND ts <= $6 + ($7 || ' seconds')::interval
+          AND ts >= $6::timestamptz - ($7 || ' seconds')::interval
+          AND ts <= $6::timestamptz + ($7 || ' seconds')::interval
         ORDER BY ts DESC
         LIMIT 1
         """,
