@@ -1,7 +1,7 @@
 """Normalize / enrich: agent + entity resolution and a basic trust score.
 
-This is the miniature 'Trust Engine' from the design doc (§4/§5): every event gets a
-freshness + completeness signal so downstream causal links can be weighted.
+Uses SELECT-then-INSERT (instead of ON CONFLICT) so it is robust across managed
+Postgres where ON CONFLICT inference on a jsonb unique index can be brittle.
 """
 from __future__ import annotations
 
@@ -13,44 +13,41 @@ import asyncpg
 from .models import EntityRef, EventIn
 
 
-async def upsert_agent(
-    conn: asyncpg.Connection,
-    name: str | None,
-    framework: str | None,
-    owning_system: str | None,
-) -> str | None:
+async def upsert_agent(conn, name, framework, owning_system):
     if not name:
         return None
     row = await conn.fetchrow(
-        """
-        INSERT INTO agents (name, owning_system, framework, version)
-        VALUES ($1, $2, $3, COALESCE($4, 'v1'))
-        ON CONFLICT (name, owning_system, version) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-        """,
-        name, owning_system, framework, None,
+        "SELECT id FROM agents WHERE name = $1 "
+        "AND owning_system IS NOT DISTINCT FROM $2 AND version = 'v1'",
+        name, owning_system,
+    )
+    if row:
+        return str(row["id"])
+    row = await conn.fetchrow(
+        "INSERT INTO agents (name, owning_system, framework, version) "
+        "VALUES ($1, $2, $3, 'v1') RETURNING id",
+        name, owning_system, framework,
     )
     return str(row["id"])
 
 
-async def resolve_entity(conn: asyncpg.Connection, ref: EntityRef) -> str:
+async def resolve_entity(conn, ref: EntityRef) -> str:
+    nk = json.dumps(ref.natural_keys, sort_keys=True)
     row = await conn.fetchrow(
-        """
-        INSERT INTO entities (type, natural_keys, system_of_record)
-        VALUES ($1, $2::jsonb, $3)
-        ON CONFLICT (type, natural_keys) DO UPDATE SET type = EXCLUDED.type
-        RETURNING id
-        """,
-        ref.type, json.dumps(ref.natural_keys), ref.system_of_record,
+        "SELECT id FROM entities WHERE type = $1 AND natural_keys = $2::jsonb",
+        ref.type, nk,
+    )
+    if row:
+        return str(row["id"])
+    row = await conn.fetchrow(
+        "INSERT INTO entities (type, natural_keys, system_of_record) "
+        "VALUES ($1, $2::jsonb, $3) RETURNING id",
+        ref.type, nk, ref.system_of_record,
     )
     return str(row["id"])
 
 
 def trust_score(ev: EventIn) -> float:
-    """Cheap, explainable score in [0,1]: completeness + recency.
-
-    Replace with the full Ponteon Trust Engine later (provenance, source reliability).
-    """
     completeness = 0.0
     completeness += 0.25 if ev.actor_name else 0.0
     completeness += 0.25 if ev.entities else 0.0
@@ -59,7 +56,6 @@ def trust_score(ev: EventIn) -> float:
 
     age_s = max(0.0, (datetime.now(timezone.utc) - _aware(ev.ts)).total_seconds())
     recency = 1.0 if age_s < 3600 else max(0.3, 1.0 - age_s / (7 * 86400))
-
     return round(0.6 * completeness + 0.4 * recency, 3)
 
 

@@ -1,18 +1,7 @@
-"""Turrion collector API (FastAPI).
-
-  GET  /healthz                 liveness + db check
-  POST /events                  ingest a witnessed event
-  GET  /runs                    recent runs with counts
-  GET  /runs/{run_id}/chain     decisions in a run + reconstructed causal edges
-  POST /ask                     Ask Martus: NL question -> cited causal narrative
-  GET  /divergences             detected agent conflicts
-  POST /runs/{run_id}/infer     Claude-assisted causal link inference
-
-On startup it applies the schema (idempotent) and optionally seeds the demo
-freight scenario (SEED_ON_START=true), so a fresh deploy has live data immediately.
-"""
+"""Turrion collector API (FastAPI). On startup applies schema + optional seed."""
 from __future__ import annotations
 
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -32,23 +21,20 @@ async def lifespan(app: FastAPI):
         await bootstrap.apply_schema(db.pool())
         if settings.seed_on_start:
             seeded = await bootstrap.seed_if_empty(db.pool())
-            if seeded:
-                print(f"[turrion] seeded {seeded} decisions (freight scenario)")
-    except Exception as exc:  # pragma: no cover
-        print(f"[turrion] bootstrap warning: {exc}")
+            print(f"[turrion] seeded {seeded} decisions")
+    except Exception:
+        print("[turrion] bootstrap error:\n" + traceback.format_exc())
     yield
     await db.close()
 
 
-app = FastAPI(title="Turrion - martus.ai", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Turrion - martus.ai", version="0.1.1", lifespan=lifespan)
 
 _origins = ["*"] if settings.allowed_origins.strip() == "*" else [
     o.strip() for o in settings.allowed_origins.split(",") if o.strip()
 ]
-app.add_middleware(
-    CORSMiddleware, allow_origins=_origins,
-    allow_methods=["*"], allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=_origins,
+                   allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/healthz")
@@ -61,11 +47,28 @@ async def healthz() -> dict:
         raise HTTPException(503, f"db unavailable: {exc}")
 
 
+@app.post("/seed")
+async def seed() -> dict:
+    """Manually (re)seed the freight scenario if the DB is empty."""
+    try:
+        n = await bootstrap.seed_if_empty(db.pool())
+        return {"seeded": n}
+    except Exception as exc:
+        print("[turrion] seed error:\n" + traceback.format_exc())
+        raise HTTPException(500, detail=str(exc))
+
+
 @app.post("/events", response_model=IngestResult)
 async def post_event(ev: EventIn) -> IngestResult:
-    async with db.pool().acquire() as conn:
-        async with conn.transaction():
-            return await ingest_event(conn, ev)
+    try:
+        async with db.pool().acquire() as conn:
+            async with conn.transaction():
+                return await ingest_event(conn, ev)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("[turrion] ingest error:\n" + traceback.format_exc())
+        raise HTTPException(500, detail=f"{type(exc).__name__}: {exc}")
 
 
 @app.get("/runs")
@@ -74,8 +77,7 @@ async def list_runs(limit: int = 50) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT r.id, r.external_id, r.status, r.started_at,
-                   COUNT(DISTINCT e.id) AS events,
-                   COUNT(DISTINCT d.id) AS decisions
+                   COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT d.id) AS decisions
             FROM runs r
             LEFT JOIN events e    ON e.run_id = r.id
             LEFT JOIN decisions d ON d.run_id = r.id
@@ -107,11 +109,8 @@ async def run_chain(run_id: str) -> dict:
         edges = []
         if ids:
             edge_rows = await conn.fetch(
-                """
-                SELECT from_id, to_id, relation, basis, confidence
-                FROM causal_edges
-                WHERE from_id = ANY($1::uuid[]) AND to_id = ANY($1::uuid[])
-                """,
+                "SELECT from_id, to_id, relation, basis, confidence FROM causal_edges "
+                "WHERE from_id = ANY($1::uuid[]) AND to_id = ANY($1::uuid[])",
                 ids,
             )
             edges = [dict(r) for r in edge_rows]
