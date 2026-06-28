@@ -1,0 +1,27 @@
+services:
+  db:
+    # Postgres 16 with Apache AGE preinstalled. pgvector is added via schema.sql
+    # (the apache/age image is Postgres + AGE; pgvector extension is created if available,
+    #  otherwise swap to an image that bundles both, e.g. a custom Dockerfile).
+    image: apache/age:PG16_latest
+    environment:
+      POSTGRES_USER: turrion
+      POSTGRES_PASSWORD: turrion
+      POSTGRES_DB: turrion
+    ports:
+      - "5432:5432"
+    volumes:
+      - turrion_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turrion -d turrion"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  turrion_pgdata:
