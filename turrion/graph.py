@@ -21,13 +21,16 @@ from .config import settings
 
 
 async def write_vertex(conn: asyncpg.Connection, label: str, key: str, props: dict) -> None:
-    """Upsert a vertex into the AGE 'testimony' graph. No-op if AGE absent."""
+    """Upsert a vertex into the AGE 'testimony' graph. Wrapped in a SAVEPOINT so that
+    when AGE is absent the failed statement rolls back only this step, not the caller's
+    surrounding transaction (otherwise ingest would hit 'transaction aborted')."""
     try:
-        await conn.execute(
-            "SELECT * FROM cypher('testimony', $$ "
-            f"MERGE (n:{label} {{key: '{key}'}}) "
-            "$$) AS (v agtype);"
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT * FROM cypher('testimony', $$ "
+                f"MERGE (n:{label} {{key: '{key}'}}) "
+                "$$) AS (v agtype);"
+            )
     except Exception:
         pass
 
